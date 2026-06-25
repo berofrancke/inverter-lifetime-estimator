@@ -4,13 +4,22 @@ Streamlit-App: Wechselrichter-Lebensdauerabschätzung
 
 Struktur:
   Tab 1 – Kondensatoren  : Würth-Modell (Elektrolyt / Polymer-THT) + Chemicon-Arrhenius
-  Tab 2 – Transistoren   : Norris-Landzberg, CIPS-08 (Bayerer), SKiM63
-           + Miner-Akkumulation über Rainflow-Klassen
+  Tab 2 – Transistoren   : Foster-Thermalsimulation + Halbleiter-Verluste (P_cond + P_sw)
+                           + bestehende Power-Cycling-Modelle (Norris-Landzberg, CIPS-08,
+                             SKiM63) + Miner-Akkumulation
   Tab 3 – Punktebewertung: Qualitative / nicht-quantifizierbare Parameter
-           (Kondensator, Transistor, PCB, System)
+           (Transistor, Kondensator, PCB, System)
   Tab 4 – Gesamtbewertung: Ampel-Score für alle Komponenten
 
 Abhängigkeiten: streamlit, numpy, pandas, plotly, scipy
+
+Modellgrenzen (Foster-Simulation):
+  - I_avg ist ein manueller Eingabeparameter (kein automatisches Lastmodell).
+  - T_h ist ein externer Eingabeparameter.
+  - P_tot wird als zeitlich konstant angenommen.
+  - Foster-Modell basiert auf Datenblatt-Z_th (junction-to-heatsink).
+  - Modell ist für erste temperaturbasierte Lebensdauerabschätzung,
+    nicht für exakte elektro-thermische Detailabbildung.
 """
 
 import numpy as np
@@ -25,7 +34,6 @@ from models.capacitor import (
     wuerth_electrolyt,
     wuerth_polymer_tht,
     arrhenius_capacitor,
-    ripple_temperature_rise,
 )
 from models.transistor import (
     norris_landzberg,
@@ -34,6 +42,12 @@ from models.transistor import (
     arrhenius_gate_oxide,
     miner_damage,
     CIPS08_INFINEON_DEFAULT,
+)
+from models.loss_model import compute_p_losses
+from models.foster_model import (
+    simulate_tj,
+    FOSTER_DEFAULT_R,
+    FOSTER_DEFAULT_TAU,
 )
 from models.scoring import (
     ComponentScore,
@@ -85,7 +99,8 @@ def ampel_farbe(normalized: float) -> str:
 st.title("⚡ Wechselrichter – Lebensdauerabschätzung")
 st.markdown(
     "Gemischt quantitativ-qualitativ | "
-    "**Arrhenius · Coffin-Manson (Norris-Landzberg / CIPS-08 / SKiM63) · Miner · Punktesystem**"
+    "**Arrhenius · Coffin-Manson (Norris-Landzberg / CIPS-08 / SKiM63) · "
+    "Foster-Thermalsimulation · Miner · Punktesystem**"
 )
 
 # ---------------------------------------------------------------------------
@@ -124,7 +139,7 @@ with tab_c:
             help="Maximaltemperatur aus Datenblatt (typisch 85 / 105 / 125 °C)",
         )
         T_A_c = st.number_input(
-            "Umgebungstemperatur im Gerät T_A [°C]",
+            "Betriebstemperatur T_A [°C]",
             value=60, min_value=-20, max_value=125,
             help="Effektive Temperatur am Einbauort inkl. Eigenerwärmung",
         )
@@ -142,35 +157,15 @@ with tab_c:
             help="Typisch 0,6–1,0 eV für Elektrolyt-Kondensatoren",
         )
 
-        st.divider()
-        st.subheader("Ripple-Strom-Eigenerwärmung")
-        I_ripple_c = st.number_input(
-            "Betriebsmäßiger Ripple-Strom I_ripple [A]",
-            value=1.0, min_value=0.0, step=0.1,
-        )
-        ESR_c = st.number_input(
-            "ESR bei Betriebsfrequenz [Ω]",
-            value=0.05, min_value=0.0, step=0.005, format="%.4f",
-        )
-
     with col_results:
         st.subheader("Ergebnisse")
 
-        # Eigenerwärmung durch Ripple
-        delta_T_ripple = ripple_temperature_rise(I_ripple_c, ESR_c)
-        T_op_c = T_A_c + delta_T_ripple
-
-        st.info(
-            f"Eigenerwärmung durch Ripple: **ΔT = {delta_T_ripple:.2f} K**  \n"
-            f"→ Effektive Betriebstemperatur: **T_op = {T_op_c:.1f} °C**"
-        )
-
         # --- Würth Elektrolyt ---
-        lx_wuerth_elyt = wuerth_electrolyt(L_nom_c, T_max_c, T_op_c)
+        lx_wuerth_elyt = wuerth_electrolyt(L_nom_c, T_max_c, T_A_c)
         # --- Würth Polymer THT ---
-        lx_wuerth_poly = wuerth_polymer_tht(L_nom_c, T_max_c, T_op_c)
+        lx_wuerth_poly = wuerth_polymer_tht(L_nom_c, T_max_c, T_A_c)
         # --- Chemicon Arrhenius ---
-        lx_arr = arrhenius_capacitor(L_nom_c, T_ref_c, T_op_c, Ea_c)
+        lx_arr = arrhenius_capacitor(L_nom_c, T_ref_c, T_A_c, Ea_c)
 
         col_r1, col_r2, col_r3 = st.columns(3)
         col_r1.metric(
@@ -211,22 +206,20 @@ with tab_c:
             name="Arrhenius (Chemicon)",
             line=dict(color="#e67e22", width=2),
         ))
-        # Marker für aktuellen Betriebspunkt
         fig_c.add_vline(
-            x=T_op_c,
+            x=T_A_c,
             line_dash="dash", line_color="red",
-            annotation_text=f"T_op={T_op_c:.1f} °C",
+            annotation_text=f"T_A={T_A_c:.1f} °C",
         )
         fig_c.update_layout(
             title="Kondensator-Lebensdauer vs. Betriebstemperatur",
-            xaxis_title="Betriebstemperatur T_op [°C]",
+            xaxis_title="Betriebstemperatur T_A [°C]",
             yaxis_title="Lebensdauer [Jahre]",
             template="plotly_white",
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
         st.plotly_chart(fig_c, use_container_width=True)
 
-        # Formelübersicht
         with st.expander("ℹ️ Formeln & Hinweise"):
             st.markdown("""
 **Würth Elektrolyt / Hybrid-Polymer (SMD H-Chip):**
@@ -236,9 +229,7 @@ $$L_x = L_{\\mathrm{nom}} \\cdot 2^{\\frac{T_{\\mathrm{max}} - T_A}{10}}$$
 $$L_x = L_{\\mathrm{nom}} \\cdot 10^{\\frac{T_{\\mathrm{max}} - T_A}{20}}$$
 
 **Arrhenius (Chemicon):**
-$$L_x = L_0 \\cdot \\exp\\!\\left[\\frac{E_a}{k_B}\\cdot\\left(\\frac{1}{T_{\\mathrm{op,K}}} - \\frac{1}{T_{\\mathrm{ref,K}}}\\right)\\right]$$
-
-Eigenerwärmung: $\\Delta T_{\\mathrm{ripple}} = \\mathrm{ESR} \\cdot I_{\\mathrm{ripple}}^2$
+$$L_x = L_0 \\cdot \\exp\\!\\left[\\frac{E_a}{k_B}\\cdot\\left(\\frac{1}{T_{\\mathrm{A,K}}} - \\frac{1}{T_{\\mathrm{ref,K}}}\\right)\\right]$$
             """)
 
 
@@ -246,16 +237,221 @@ Eigenerwärmung: $\\Delta T_{\\mathrm{ripple}} = \\mathrm{ESR} \\cdot I_{\\mathr
 # TAB 2 – TRANSISTOREN
 # ===========================================================================
 with tab_t:
-    st.header("Transistor-Lebensdauer (Power Cycling)")
-    st.markdown(
-        "Drei implementierte Modelle: **Norris-Landzberg** (Gl. 4.1), "
-        "**Bayerer / CIPS-08** (Gl. 4.2), **SKiM63** (Gl. 4.3). "
-        "Zusätzlich: **Miner-Akkumulation** über bis zu 8 Rainflow-Klassen."
-    )
+    st.header("Transistor – Thermalsimulation & Lebensdauer")
 
-    sub_t1, sub_t2, sub_t3, sub_t4 = st.tabs([
-        "Norris-Landzberg", "CIPS-08 (Bayerer)", "SKiM63", "Miner + Rainflow"
+    sub_foster, sub_t1, sub_t2, sub_t3, sub_t4 = st.tabs([
+        "🌡️ Foster-Thermalsimulation",
+        "Norris-Landzberg",
+        "CIPS-08 (Bayerer)",
+        "SKiM63",
+        "Miner + Rainflow",
     ])
+
+    # -----------------------------------------------------------------------
+    # Foster-Thermalsimulation (NEU)
+    # -----------------------------------------------------------------------
+    with sub_foster:
+        st.subheader("Foster-Thermalmodell – Z_th(t) und T_j(t)")
+        st.info(
+            "**Modellgrenzen:** I_avg ist manueller Input · keine Topologie/Duty-Cycle-Modellierung · "
+            "T_h ist externer Eingabeparameter · Foster-Parameter aus Datenblatt-Z_th · "
+            "Modell für erste temperaturbasierte Lebensdauerabschätzung, "
+            "keine exakte elektro-thermische Detailabbildung."
+        )
+
+        st.latex(
+            r"Z_{th}(t) = \sum_i r_i \left(1 - e^{-t/\tau_i}\right)"
+            r"\qquad"
+            r"T_j(t) = T_h + P_{tot} \cdot Z_{th}(t)"
+        )
+
+        col_loss, col_foster = st.columns([1, 1])
+
+        # --- Verlustmodell-Eingaben ---
+        with col_loss:
+            st.subheader("1) Verlustmodell")
+
+            st.markdown("**Leitverluste (P_cond = V_CE,sat × I_avg)**")
+            f1, f2 = st.columns(2)
+            with f1:
+                vce_25  = st.number_input("V_CE,sat bei 25 °C [V]",  value=1.70, min_value=0.1, step=0.01, format="%.3f")
+                T2_vce  = st.number_input("Mittlere Temp.-Stützstelle T2 [°C]", value=75.0, min_value=26.0, max_value=124.0)
+            with f2:
+                vce_T2  = st.number_input("V_CE,sat bei T2 [V]",     value=1.85, min_value=0.1, step=0.01, format="%.3f")
+                vce_125 = st.number_input("V_CE,sat bei 125 °C [V]", value=2.05, min_value=0.1, step=0.01, format="%.3f")
+
+            I_avg = st.number_input(
+                "I_avg – Mittlerer Kollektorstrom [A]",
+                value=400.0, min_value=0.1, step=10.0,
+                help="Manuelle Eingabe. Später durch Lastmodell ersetzbar.",
+            )
+
+            st.divider()
+            st.markdown("**Schaltverluste (P_sw = (E_on + E_off) × f_sw)**")
+            s1, s2 = st.columns(2)
+            with s1:
+                E_on = st.number_input(
+                    "E_on [J]", value=0.025, min_value=0.0, step=0.001, format="%.4f",
+                    help="Einschaltverlustenergie aus Datenblatt bei Nennstrom [J]"
+                )
+                E_off = st.number_input(
+                    "E_off [J]", value=0.015, min_value=0.0, step=0.001, format="%.4f",
+                    help="Ausschaltverlustenergie aus Datenblatt bei Nennstrom [J]"
+                )
+            with s2:
+                f_sw = st.number_input(
+                    "f_sw – Schaltfrequenz [Hz]", value=5000.0, min_value=1.0, step=100.0,
+                    help="Schaltfrequenz des Wechselrichters [Hz]"
+                )
+
+        # --- Foster-Parameter-Eingaben ---
+        with col_foster:
+            st.subheader("2) Foster-Modell")
+
+            st.markdown("**Anzahl Foster-Glieder**")
+            n_foster = st.slider("Anzahl RC-Glieder", min_value=1, max_value=8, value=4)
+
+            r_vals   = []
+            tau_vals = []
+
+            for i in range(n_foster):
+                r_def   = FOSTER_DEFAULT_R[i]   if i < len(FOSTER_DEFAULT_R)   else 0.01
+                tau_def = FOSTER_DEFAULT_TAU[i] if i < len(FOSTER_DEFAULT_TAU) else 0.01
+                c_r, c_tau = st.columns(2)
+                r_i   = c_r.number_input(
+                    f"r_{i+1} [K/W]", value=float(r_def),
+                    min_value=0.0, step=0.001, format="%.5f", key=f"r_{i}"
+                )
+                tau_i = c_tau.number_input(
+                    f"τ_{i+1} [s]", value=float(tau_def),
+                    min_value=1e-6, step=0.001, format="%.5f", key=f"tau_{i}"
+                )
+                r_vals.append(r_i)
+                tau_vals.append(tau_i)
+
+            rth_sum = sum(r_vals)
+            st.info(f"Σ r_i = **{rth_sum:.4f} K/W** (Gesamt-Wärmewiderstand R_th,jh)")
+
+            st.divider()
+            st.subheader("3) Simulation")
+            sim1, sim2 = st.columns(2)
+            T_h   = sim1.number_input("T_h – Kühlkörpertemperatur [°C]", value=70.0, min_value=0.0, max_value=150.0)
+            t_end = sim1.number_input("Simulationszeit t_end [s]", value=2.0, min_value=0.01, step=0.1)
+            dt    = sim2.number_input("Zeitschritt dt [s]", value=0.002, min_value=1e-5, step=0.001, format="%.4f")
+
+        # --- Berechnung ---
+        # Verluste bei T_h (erste Näherung ohne Iteration)
+        loss_result = compute_p_losses(
+            I_avg=I_avg,
+            vce_sat_25=vce_25,
+            vce_sat_T2=vce_T2,
+            T2=T2_vce,
+            vce_sat_125=vce_125,
+            E_on=E_on,
+            E_off=E_off,
+            f_sw=f_sw,
+            T_j=T_h,   # erste Näherung: T_j ≈ T_h für Vce-Interpolation
+        )
+        P_cond = loss_result["P_cond"]
+        P_sw   = loss_result["P_sw"]
+        P_tot  = loss_result["P_tot"]
+
+        sim_result = simulate_tj(
+            P_tot=P_tot,
+            T_h=T_h,
+            r=r_vals,
+            tau=tau_vals,
+            t_end=t_end,
+            dt=dt,
+        )
+
+        # --- Verlust-Ergebnisse ---
+        st.divider()
+        st.subheader("Verluste")
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("P_cond", f"{P_cond:.1f} W", help=f"V_CE,sat(T_h) = {loss_result['V_CE_sat_eff']:.3f} V × I_avg = {I_avg:.0f} A")
+        mc2.metric("P_sw",   f"{P_sw:.1f} W",   help=f"(E_on + E_off) × f_sw = ({E_on:.4f}+{E_off:.4f}) × {f_sw:.0f}")
+        mc3.metric("P_tot",  f"{P_tot:.1f} W")
+        mc4.metric("T_j,∞ (stationär)", f"{sim_result['Tj_inf']:.1f} °C",
+                   help=f"T_h + P_tot × R_th = {T_h} + {P_tot:.1f} × {rth_sum:.4f}")
+
+        # --- Plots ---
+        t_arr  = sim_result["t"]
+        zth_arr = sim_result["Zth"]
+        tj_arr  = sim_result["Tj"]
+
+        fig_th = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=["T_j(t) – Sperrschichttemperatur", "Z_th(t) – Thermische Impedanz"],
+            vertical_spacing=0.12,
+        )
+
+        # T_j(t)
+        fig_th.add_trace(go.Scatter(
+            x=t_arr, y=tj_arr,
+            name="T_j(t)",
+            line=dict(color="#e74c3c", width=2),
+        ), row=1, col=1)
+        fig_th.add_hline(
+            y=sim_result["Tj_inf"],
+            line_dash="dash", line_color="#c0392b",
+            annotation_text=f"T_j,∞ = {sim_result['Tj_inf']:.1f} °C",
+            row=1, col=1,
+        )
+
+        # Z_th(t)
+        fig_th.add_trace(go.Scatter(
+            x=t_arr, y=zth_arr,
+            name="Z_th(t)",
+            line=dict(color="#2980b9", width=2),
+        ), row=2, col=1)
+        fig_th.add_hline(
+            y=rth_sum,
+            line_dash="dash", line_color="#1a5276",
+            annotation_text=f"R_th = {rth_sum:.4f} K/W",
+            row=2, col=1,
+        )
+
+        fig_th.update_xaxes(title_text="Zeit t [s]")
+        fig_th.update_yaxes(title_text="T_j [°C]", row=1, col=1)
+        fig_th.update_yaxes(title_text="Z_th [K/W]", row=2, col=1)
+        fig_th.update_layout(
+            template="plotly_white",
+            height=600,
+            showlegend=False,
+        )
+        st.plotly_chart(fig_th, use_container_width=True)
+
+        # Formelübersicht
+        with st.expander("ℹ️ Formeln & Modellgrenzen"):
+            st.markdown("""
+**Leitverluste:**
+$$P_{cond} = V_{CE,sat}(T_j) \\cdot I_{avg}$$
+*V_CE,sat wird linear zwischen drei Datenblattpunkten (25 °C / T2 / 125 °C) interpoliert.*
+
+**Schaltverluste:**
+$$P_{sw} = (E_{on} + E_{off}) \\cdot f_{sw}$$
+
+**Gesamtverluste:**
+$$P_{tot} = P_{cond} + P_{sw}$$
+
+**Foster-Thermalmodell:**
+$$Z_{th}(t) = \\sum_i r_i \\left(1 - e^{-t/\\tau_i}\\right)$$
+
+**Sperrschichttemperatur:**
+$$T_j(t) = T_h + P_{tot} \\cdot Z_{th}(t)$$
+
+**Stationärer Endwert:**
+$$T_{j,\\infty} = T_h + P_{tot} \\cdot \\sum_i r_i$$
+
+**Modellgrenzen:**
+- I_avg ist in dieser Version ein **manueller Input** (kein automatisches Lastmodell).
+- Keine automatische Topologie- / Duty-Cycle-Modellierung.
+- T_h ist ein **externer Eingabeparameter** (z. B. aus Kühlkörper-Simulation).
+- Foster-Modell basiert auf Datenblatt-Z_th (junction-to-heatsink oder junction-to-case).
+- Modell ist für eine **erste temperaturbasierte Lebensdauerabschätzung** gedacht,
+  nicht für exakte elektro-thermische Detailabbildung.
+            """)
 
     # -----------------------------------------------------------------------
     # Norris-Landzberg
@@ -289,7 +485,6 @@ with tab_t:
         nl_Nf = norris_landzberg(nl_dTj, nl_Tjm, nl_alpha, nl_alpha2, nl_n1, nl_Ea, nl_f)
         st.metric("N_f (Norris-Landzberg)", f"{nl_Nf:,.0f} Zyklen" if nl_Nf < 1e12 else "> 10¹² Zyklen")
 
-        # Sensitivität über ΔT_j
         dT_range = np.linspace(5, 150, 200)
         Nf_nl_sweep = np.array([
             norris_landzberg(dt, nl_Tjm, nl_alpha, nl_alpha2, nl_n1, nl_Ea, nl_f)
@@ -343,7 +538,7 @@ with tab_t:
                                 ci_K, ci_b1, ci_b2, ci_b3, ci_b4, ci_b5)
         st.metric("N_f (CIPS-08)", f"{ci_Nf:,.0f} Zyklen" if ci_Nf < 1e14 else "> 10¹⁴ Zyklen")
 
-        # Sensitivitätsplot: ΔT_j Sweep
+        dT_range = np.linspace(5, 150, 200)
         Nf_ci_sweep = np.array([
             bayerer_cips08(dt, ci_Tjm, ci_Ion, ci_V, ci_D,
                            ci_K, ci_b1, ci_b2, ci_b3, ci_b4, ci_b5)
@@ -445,7 +640,6 @@ with tab_t:
         Nf_arr = df_miner["N_f,i (CM)"].values
         D_total = miner_damage(n_arr, Nf_arr)
 
-        # Farbe für D_total
         if D_total < 0.5:
             d_color = FARBE_GUT
             d_label = "unkritisch"
@@ -464,13 +658,11 @@ with tab_t:
             unsafe_allow_html=True,
         )
 
-        # Tabelle
         df_display = df_miner.copy()
         df_display["D_i = n_i/N_f,i"] = df_display["D_i = n_i/N_f,i"].map("{:.6f}".format)
         df_display["N_f,i (CM)"] = df_display["N_f,i (CM)"].map("{:,.0f}".format)
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-        # Balkendiagramm Schädigung je Klasse
         fig_miner = px.bar(
             df_miner, x="Klasse", y="D_i = n_i/N_f,i",
             color="D_i = n_i/N_f,i",
@@ -494,7 +686,6 @@ with tab_score:
         "Binäre Kriterien: **0 = fehlt / 1 = vorhanden**."
     )
 
-    # Container für alle Scores (wird auch in Tab 4 verwendet)
     scores: dict[str, ComponentScore] = {}
 
     # -----------------------------------------------------------------------
@@ -530,7 +721,6 @@ with tab_score:
             qg = st.number_input("Gate-Ladung Q_G [nC]", value=50.0, min_value=0.0)
             sc_t.add("Q_G", score_gate_charge(qg))
 
-        # Binär
         st.markdown("**Binär (0/1)**")
         b1, b2, b3, b4 = st.columns(4)
         sc_t.add("Datenblatt",      float(b1.checkbox("Datenblatt vorhanden", value=True)))
@@ -670,7 +860,6 @@ with tab_score:
             sc_s.add("L_loop",
                       5 if l_loop < 10 else (3 if l_loop <= 50 else (1 if l_loop <= 200 else 0)))
 
-        # Derating-Anzeige (informativ)
         st.subheader("Derating-Faktoren (informativ)")
         d1, d2, d3 = st.columns(3)
         V_derate  = d1.number_input("k_V = V_op/V_max [-]",    value=0.75, min_value=0.0, max_value=1.5, step=0.01)
@@ -680,8 +869,7 @@ with tab_score:
         for label, ratio, target in [("Spannungs-Derating", V_derate, 0.80),
                                        ("Temperatur-Derating", T_derate, 0.90),
                                        ("Strom-Derating", I_derate, 0.75)]:
-            col_d, _, _ = derating_status(ratio, target)
-            _, txt = derating_status(ratio, target)
+            col_d, txt = derating_status(ratio, target)
             st.markdown(f"**{label}:** <span style='color:{col_d}'>{txt}</span>",
                          unsafe_allow_html=True)
 
@@ -694,7 +882,6 @@ with tab_score:
             unsafe_allow_html=True,
         )
 
-    # Platzhalter für Spule und Relais (Basiswerte)
     sc_sp = ComponentScore("Spule",  MAX_SCORES["Spule"])
     sc_sp.add("Platzhalter", 0)
     scores["Spule"]  = sc_sp
@@ -710,24 +897,20 @@ with tab_score:
 with tab_gesamt:
     st.header("Gesamtbewertung – Lebensdauerindex")
 
-    # Sicherstellen dass scores befüllt sind (falls Tab 3 nicht besucht)
     for comp in ["Transistor", "Kondensator", "Leiterplatte", "System", "Spule", "Relais"]:
         if comp not in scores:
             sc_dummy = ComponentScore(comp, MAX_SCORES[comp])
             sc_dummy.add("Platzhalter", 0)
             scores[comp] = sc_dummy
 
-    # Gesamtpunkte
     total_punkte = sum(sc.total for sc in scores.values())
     total_norm   = total_punkte / TOTAL_MAX
 
-    # Ampelfarbe gesamt
     total_color = ampel_farbe(total_norm)
     total_label = ("GUT – Lebensdauer OK" if total_norm >= 0.80
                    else "MITTEL – Maßnahmen prüfen" if total_norm >= 0.50
                    else "KRITISCH – Sofort handeln")
 
-    # Anzeige Gesamt-KPI
     kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
     kpi_col1.metric("Gesamtpunkte", f"{total_punkte:.0f} / {TOTAL_MAX}")
     kpi_col2.metric("Normierter Score", f"{total_norm*100:.1f} %")
@@ -740,7 +923,6 @@ with tab_gesamt:
 
     st.divider()
 
-    # Detailtabelle
     rows_g = []
     for comp, sc in scores.items():
         c_color, c_status = sc.status
@@ -753,7 +935,6 @@ with tab_gesamt:
     df_g = pd.DataFrame(rows_g)
     st.dataframe(df_g, use_container_width=True, hide_index=True)
 
-    # Radar-Chart
     komponnenten = [sc.name for sc in scores.values()]
     norm_vals    = [sc.normalized * 100 for sc in scores.values()]
 
@@ -766,7 +947,6 @@ with tab_gesamt:
         line_color="#2980b9",
         fillcolor="rgba(41,128,185,0.25)",
     ))
-    # Zielwert-Ring bei 80 %
     fig_radar.add_trace(go.Scatterpolar(
         r=[80] * (len(komponnenten) + 1),
         theta=komponnenten + [komponnenten[0]],
@@ -782,7 +962,6 @@ with tab_gesamt:
     )
     st.plotly_chart(fig_radar, use_container_width=True)
 
-    # Balkendiagramm Score je Komponente
     colors = [ampel_farbe(sc.normalized) for sc in scores.values()]
     fig_bar = go.Figure(go.Bar(
         x=komponnenten,
@@ -801,7 +980,6 @@ with tab_gesamt:
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
-    # Handlungsempfehlungen
     st.subheader("Handlungsempfehlungen")
     for comp, sc in scores.items():
         c_col, c_stat = sc.status

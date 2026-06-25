@@ -1,11 +1,7 @@
-"""
-Wechselrichter-Lebensdauermodelle.
-
-Verfügbare Module:
-  arrhenius     – allgemeines Arrhenius-Modell (Basisklasse)
-  capacitor     – Kondensator-Lebensdauermodelle (Würth + Chemicon/Arrhenius)
-  transistor    – Transistor-Lebensdauermodelle (Norris-Landzberg, CIPS-08, SKiM63)
-  coffin_manson – einfaches Coffin-Manson-Modell (Legacy, für Rückwärtskompatibilität)
-  miner         – Miner-Schadensakkumulation (Legacy-Klasse)
-  scoring       – Punktebewertungssystem für qualitative Parameter
-"""
+# Modell-Package
+# Verfügbare Modelle:
+#   capacitor   – Kondensator-Lebensdauer (Würth, Arrhenius)
+#   transistor  – Power-Cycling-Modelle (Norris-Landzberg, CIPS-08, SKiM63)
+#   loss_model  – Halbleiter-Verlustmodell (P_cond, P_sw, P_tot)
+#   foster_model – Foster-Thermalmodell (Z_th, T_j)
+#   scoring     – Punktebewertungs-System
