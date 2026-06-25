@@ -73,12 +73,48 @@ def foster_zth(
 
 
 # ---------------------------------------------------------------------------
+# Th(t) – zeitabhängige Kühlkörpertemperatur (transiente Aufheizung)
+# ---------------------------------------------------------------------------
+
+def heatsink_temperature(
+    P_tot: float,
+    Rth: float,
+    m: float,
+    c: float,
+    Tamb: float,
+    t: Union[float, np.ndarray],
+) -> Union[float, np.ndarray]:
+    """
+    Zeitabhängige Kühlkörper-/Modultemperatur T_h(t) (transiente Aufheizung
+    einer thermischen Masse über einen Wärmewiderstand R_th).
+
+        T_h(t) = (P_tot * R_th * t) / (m * c * R_th + t) + T_amb
+
+    Args:
+        P_tot: Gesamtverlustleistung [W]
+        Rth:   Wärmewiderstand [K/W]
+        m:     Masse des Halbleitermoduls [kg]
+        c:     Spezifische Wärmekapazität [J/(kg·K)]
+        Tamb:  Umgebungstemperatur [°C]
+        t:     Zeitpunkt(e) [s] – float oder numpy-Array
+
+    Returns:
+        T_h [°C] – gleicher Typ wie t
+
+    Hinweis:
+        Für t → ∞ strebt T_h gegen P_tot * R_th + T_amb (stationärer Endwert).
+    """
+    denom = m * c * Rth + t
+    return (P_tot * Rth * t) / denom + Tamb
+
+
+# ---------------------------------------------------------------------------
 # T_j(t) – Simulation der Sperrschichttemperatur
 # ---------------------------------------------------------------------------
 
 def simulate_tj(
     P_tot: float,
-    T_h: float,
+    T_h: Union[float, np.ndarray],
     r: Sequence[float],
     tau: Sequence[float],
     t_end: float,
@@ -87,11 +123,12 @@ def simulate_tj(
     """
     Simuliert den zeitlichen Verlauf der Sperrschichttemperatur T_j(t).
 
-    T_j(t) = T_h + P_tot * Z_th(t)
+    T_j(t) = T_h(t) + P_tot * Z_th(t)
 
     Args:
         P_tot:  Gesamtverlustleistung [W] (konstant, aus Verlustmodell)
-        T_h:    Kühlkörper-/Gehäusetemperatur [°C] (externer Parameter)
+        T_h:    Kühlkörper-/Gehäusetemperatur [°C]. Skalar (konstanter Modus)
+                oder Array gleicher Länge wie der Zeitvektor (dynamischer Modus).
         r:      Foster-Partialwiderstände r_i [K/W]
         tau:    Foster-Zeitkonstanten τ_i [s]
         t_end:  Simulationsendzeit [s]
@@ -101,22 +138,32 @@ def simulate_tj(
         dict mit:
             t      – Zeitvektor [s]
             Zth    – Z_th(t) [K/W]
+            Th     – T_h(t) [°C] (Array, auch im konstanten Modus)
             Tj     – T_j(t) [°C]
             Tj_inf – stationärer Endwert T_j,∞ [°C]
+            Th_end – T_h am Ende der Simulation [°C]
             Rth_total – Σ r_i (Gesamt-Wärmewiderstand) [K/W]
     """
     t = np.arange(0.0, t_end + dt, dt)
     zth = foster_zth(t, r, tau)
-    tj  = T_h + P_tot * zth
+
+    th_arr = np.asarray(T_h, dtype=float)
+    if th_arr.ndim == 0:
+        th_arr = np.full_like(t, float(T_h))
+
+    tj = th_arr + P_tot * zth
 
     r_arr = np.asarray(r, dtype=float)
     rth_total = float(np.sum(r_arr))
-    tj_inf = T_h + P_tot * rth_total
+    th_end = float(th_arr[-1])
+    tj_inf = th_end + P_tot * rth_total
 
     return {
         "t":          t,
         "Zth":        zth,
+        "Th":         th_arr,
         "Tj":         tj,
         "Tj_inf":     tj_inf,
+        "Th_end":     th_end,
         "Rth_total":  rth_total,
     }

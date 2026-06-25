@@ -28,6 +28,47 @@ def _interp_25_125(T_j: float, val_25: float, val_125: float) -> float:
     return val_25 + t * (val_125 - val_25)
 
 
+def select_vce_sat(
+    vce_sat_25: float,
+    vce_sat_mid: float,
+    vce_sat_125: float,
+    mode: str = "interp",
+    T_mid: float = 75.0,
+    T_op: float = 75.0,
+) -> float:
+    """
+    Wählt bzw. interpoliert den V_CE,sat-Wert aus drei Stützstellen
+    (25 °C, Mitteltemperatur, 125 °C).
+
+    Args:
+        vce_sat_25:  V_CE,sat bei 25 °C [V]
+        vce_sat_mid: V_CE,sat bei der Mitteltemperatur T_mid [V]
+        vce_sat_125: V_CE,sat bei 125 °C [V]
+        mode:        "25" | "mid" | "125" | "interp"
+        T_mid:       Mitteltemperatur der mittleren Stützstelle [°C] (z. B. 75 °C)
+        T_op:        Betriebstemperatur für die Interpolation [°C] (nur bei mode="interp")
+
+    Returns:
+        V_CE,sat [V]
+
+    Hinweis:
+        Bei mode="interp" wird stückweise linear über die drei Stützstellen
+        (25 → T_mid → 125) interpoliert; ausserhalb wird auf die Randwerte begrenzt.
+    """
+    if mode == "25":
+        return float(vce_sat_25)
+    if mode == "mid":
+        return float(vce_sat_mid)
+    if mode == "125":
+        return float(vce_sat_125)
+    # mode == "interp": stückweise lineare Interpolation über 3 Stützstellen
+    return float(np.interp(
+        T_op,
+        [25.0, float(T_mid), 125.0],
+        [vce_sat_25, vce_sat_mid, vce_sat_125],
+    ))
+
+
 # ---------------------------------------------------------------------------
 # Hauptfunktion: Verlustberechnung
 # ---------------------------------------------------------------------------
@@ -43,6 +84,10 @@ def compute_p_losses(
     f_sw: float,
     duty_cycle: float = 0.5,
     T_j: float = 25.0,
+    vce_sat_mid: float = None,
+    vce_mode: str = "interp",
+    T_mid: float = 75.0,
+    T_op: float = None,
 ) -> dict:
     """
     Berechnet Leit-, Schalt- und Gesamtverluste.
@@ -66,7 +111,14 @@ def compute_p_losses(
     Returns:
         dict mit: P_cond, P_sw, P_tot, V_CE_sat_eff, E_on_eff, E_off_eff
     """
-    vce_eff  = _interp_25_125(T_j, vce_sat_25, vce_sat_125)
+    if vce_sat_mid is None:
+        vce_sat_mid = 0.5 * (vce_sat_25 + vce_sat_125)
+    if T_op is None:
+        T_op = T_j
+    vce_eff = select_vce_sat(
+        vce_sat_25, vce_sat_mid, vce_sat_125,
+        mode=vce_mode, T_mid=T_mid, T_op=T_op,
+    )
     e_on_eff = _interp_25_125(T_j, E_on_25,    E_on_125)
     e_off_eff = _interp_25_125(T_j, E_off_25,  E_off_125)
 
