@@ -3,14 +3,14 @@ Streamlit-App: Wechselrichter-Lebensdauerabschätzung
 =====================================================
 
 Struktur:
-  Tab 1 – Kondensatoren  : Würth-Modell (Elektrolyt / Polymer-THT) + Chemicon-Arrhenius
-  Tab 2 – Transistoren   : Foster-Thermalsimulation (Verluste + Zth + Tj)
+  Tab 1 – Kondensatoren  : Würth-Modell (Elektrolyt / Polymer-THT) mit Ripple-Faktor k
+  Tab 2 – Transistoren   : Foster-Thermalsimulation (Verluste + Th(t) + Zth + Tj)
   Tab 3 – Punktebewertung: Qualitative / nicht-quantifizierbare Parameter
   Tab 4 – Gesamtbewertung: Ampel-Score für alle Komponenten
 
 Modellgrenzen:
   - I_avg ist ein manueller Input (kein automatisches Lastmodell).
-  - T_h ist ein externer Eingabeparameter.
+  - T_h ist konstant (extern) ODER zeitabhängig aus thermischer Masse modellierbar.
   - P_tot wird als zeitlich konstant angenommen.
   - Foster-Modell basiert auf Datenblatt-Z_th.
   - Duty-Cycle D beeinflusst P_cond; Schaltenergien sind pro Schaltvorgang.
@@ -26,11 +26,11 @@ import streamlit as st
 from models.capacitor import (
     wuerth_electrolyt,
     wuerth_polymer_tht,
-    arrhenius_capacitor,
 )
 from models.loss_model import compute_p_losses
 from models.foster_model import (
     simulate_tj,
+    heatsink_temperature,
     FOSTER_DEFAULT_R,
     FOSTER_DEFAULT_TAU,
 )
@@ -102,8 +102,8 @@ tab_c, tab_t, tab_score, tab_gesamt = st.tabs([
 with tab_c:
     st.header("Kondensator-Lebensdauer")
     st.markdown(
-        "Berechnung nach zwei Methodiken: "
-        "**Würth-Modell** (Basis-2/10-Regel) und **Arrhenius-Modell** (Chemicon)."
+        "Berechnung nach dem **Würth-Modell** (Basis-2/10-Regel) "
+        "inkl. Ripple-Lebensdauerfaktor **k**."
     )
 
     col_params, col_results = st.columns([1, 1])
@@ -128,45 +128,36 @@ with tab_c:
         )
 
         st.divider()
-        st.subheader("Arrhenius-Parameter (Chemicon)")
-        T_ref_c = st.number_input(
-            "Referenztemperatur T_ref [°C]",
-            value=105, min_value=60, max_value=160,
-            key="c_tref",
-        )
-        Ea_c = st.number_input(
-            "Aktivierungsenergie Ea [eV]",
-            value=0.94, min_value=0.3, max_value=1.5, step=0.05,
-            key="c_ea",
+        st.subheader("Ripple-Derating")
+        k_factor = st.number_input(
+            "Lebensdauerfaktor k [-]",
+            value=1.0, min_value=0.0, step=0.1,
+            key="c_k",
+            help="Lebensdauerfaktor k: erhöht die Lebensdauer, wenn der "
+                 "tatsächliche Ripple-Strom < Nennripple-Strom ist.",
         )
 
     with col_results:
         st.subheader("Ergebnisse")
 
-        lx_wuerth_elyt = wuerth_electrolyt(L_nom_c, T_max_c, T_A_c)
-        lx_wuerth_poly = wuerth_polymer_tht(L_nom_c, T_max_c, T_A_c)
-        lx_arr         = arrhenius_capacitor(L_nom_c, T_ref_c, T_A_c, Ea_c)
+        lx_wuerth_elyt = wuerth_electrolyt(L_nom_c, T_max_c, T_A_c, k_factor)
+        lx_wuerth_poly = wuerth_polymer_tht(L_nom_c, T_max_c, T_A_c, k_factor)
 
-        col_r1, col_r2, col_r3 = st.columns(3)
+        col_r1, col_r2 = st.columns(2)
         col_r1.metric("Würth Elektrolyt",
                        f"{lx_wuerth_elyt/8760:.1f} J" if lx_wuerth_elyt < 1e9 else "> Mio. J")
         col_r2.metric("Würth Polymer THT",
                        f"{lx_wuerth_poly/8760:.1f} J" if lx_wuerth_poly < 1e9 else "> Mio. J")
-        col_r3.metric("Arrhenius (Chemicon)",
-                       f"{lx_arr/8760:.1f} J" if lx_arr < 1e9 else "> Mio. J")
 
         T_sweep            = np.linspace(20, T_max_c, 200)
-        lx_wuerth_e_sweep  = np.array([wuerth_electrolyt(L_nom_c, T_max_c, T) for T in T_sweep])
-        lx_wuerth_p_sweep  = np.array([wuerth_polymer_tht(L_nom_c, T_max_c, T) for T in T_sweep])
-        lx_arr_sweep       = np.array([arrhenius_capacitor(L_nom_c, T_ref_c, T, Ea_c) for T in T_sweep])
+        lx_wuerth_e_sweep  = np.array([wuerth_electrolyt(L_nom_c, T_max_c, T, k_factor) for T in T_sweep])
+        lx_wuerth_p_sweep  = np.array([wuerth_polymer_tht(L_nom_c, T_max_c, T, k_factor) for T in T_sweep])
 
         fig_c = go.Figure()
         fig_c.add_trace(go.Scatter(x=T_sweep, y=lx_wuerth_e_sweep / 8760,
                                     name="Würth Elektrolyt", line=dict(color="#2980b9", width=2)))
         fig_c.add_trace(go.Scatter(x=T_sweep, y=lx_wuerth_p_sweep / 8760,
                                     name="Würth Polymer THT", line=dict(color="#8e44ad", width=2)))
-        fig_c.add_trace(go.Scatter(x=T_sweep, y=lx_arr_sweep / 8760,
-                                    name="Arrhenius (Chemicon)", line=dict(color="#e67e22", width=2)))
         fig_c.add_vline(x=T_A_c, line_dash="dash", line_color="red",
                          annotation_text=f"T_A={T_A_c:.1f} °C")
         fig_c.update_layout(
@@ -180,11 +171,12 @@ with tab_c:
 
         with st.expander("ℹ️ Formeln"):
             st.markdown("""
-**Würth Elektrolyt:** $L_x = L_{nom} \\cdot 2^{(T_{max}-T_A)/10}$
+**Würth Elektrolyt:** $L_x = L_{nom} \\cdot 2^{(T_{max}-T_A)/10} \\cdot k$
 
-**Würth Polymer THT:** $L_x = L_{nom} \\cdot 10^{(T_{max}-T_A)/20}$
+**Würth Polymer THT:** $L_x = L_{nom} \\cdot 10^{(T_{max}-T_A)/20} \\cdot k$
 
-**Arrhenius (Chemicon):** $L_x = L_0 \\cdot \\exp\\!\\left[\\frac{E_a}{k_B}\\cdot\\left(\\frac{1}{T_{A,K}} - \\frac{1}{T_{ref,K}}\\right)\\right]$
+**Ripple-Faktor k:** erhöht die Lebensdauer, wenn der tatsächliche
+Ripple-Strom unter dem Nennripple-Strom liegt ($k > 1$). Standard $k = 1{,}0$.
             """)
 
 
@@ -196,7 +188,7 @@ with tab_t:
     st.info(
         "**Modellgrenzen:** "
         "I_avg = manueller Input · "
-        "T_h = externer Eingabeparameter · "
+        "T_h = konstant ODER dynamisch T_h(t) aus thermischer Masse · "
         "P_tot zeitlich konstant · "
         "Foster-Parameter aus Datenblatt-Z_th · "
         "Duty-Cycle D beeinflusst P_cond (nicht die Schaltenergien) · "
@@ -206,7 +198,7 @@ with tab_t:
     st.latex(
         r"Z_{th}(t) = \sum_i r_i \left(1 - e^{-t/\tau_i}\right)"
         r"\qquad"
-        r"T_j(t) = T_h + P_{tot} \cdot Z_{th}(t)"
+        r"T_j(t) = T_h(t) + P_{tot} \cdot Z_{th}(t)"
     )
 
     # -----------------------------------------------------------------------
@@ -219,12 +211,43 @@ with tab_t:
         st.subheader("Verlustmodell")
 
         # ---- Leitverluste ----
-        st.markdown("**Leitverluste – V_CE,sat (linear 25 → 125 °C)**")
-        lv1, lv2 = st.columns(2)
+        st.markdown("**Leitverluste – V_CE,sat (3 Stützstellen)**")
+        lv1, lv2, lv3 = st.columns(3)
         vce_25  = lv1.number_input("V_CE,sat @ 25 °C [V]",  value=1.70, min_value=0.01,
                                     step=0.01, format="%.3f", key="vce25")
-        vce_125 = lv2.number_input("V_CE,sat @ 125 °C [V]", value=2.05, min_value=0.01,
+        vce_mid = lv2.number_input("V_CE,sat @ mid [V]", value=1.85, min_value=0.01,
+                                    step=0.01, format="%.3f", key="vcemid")
+        vce_125 = lv3.number_input("V_CE,sat @ 125 °C [V]", value=2.05, min_value=0.01,
                                     step=0.01, format="%.3f", key="vce125")
+
+        T_mid = st.number_input(
+            "Mitteltemperatur T_mid [°C]", value=75.0, min_value=26.0, max_value=124.0,
+            step=1.0, key="vce_tmid",
+            help="Temperatur der mittleren V_CE,sat-Stützstelle (z. B. 75 °C).",
+        )
+        vce_mode_label = st.selectbox(
+            "V_CE,sat-Auswahl",
+            ["Interpolation (T_op)", "Fester Wert @ 25 °C",
+             "Fester Wert @ mid", "Fester Wert @ 125 °C"],
+            key="vce_mode",
+            help="Fester Stützpunkt oder lineare Interpolation über die "
+                 "drei Stützstellen anhand der Betriebstemperatur T_op.",
+        )
+        _vce_mode_map = {
+            "Interpolation (T_op)": "interp",
+            "Fester Wert @ 25 °C": "25",
+            "Fester Wert @ mid": "mid",
+            "Fester Wert @ 125 °C": "125",
+        }
+        vce_mode = _vce_mode_map[vce_mode_label]
+        if vce_mode == "interp":
+            T_op = st.number_input(
+                "Betriebstemperatur T_op [°C]", value=75.0, min_value=25.0, max_value=125.0,
+                step=1.0, key="vce_top",
+                help="Betriebstemperatur für die V_CE,sat-Interpolation.",
+            )
+        else:
+            T_op = None
 
         I_avg = st.number_input(
             "I_avg – Mittlerer Kollektorstrom [A]",
@@ -291,35 +314,71 @@ with tab_t:
 
         st.divider()
         st.subheader("Simulation")
+
+        th_mode = st.radio(
+            "Kühlkörpertemperatur T_h",
+            ["Konstantes T_h", "Dynamisches T_h(t)"],
+            key="th_mode", horizontal=True,
+            help="Konstant: fester T_h-Wert. Dynamisch: transiente Aufheizung "
+                 "der thermischen Masse T_h(t) = (P_tot·R_th·t)/(m·c·R_th + t) + T_amb.",
+        )
+
         sim1, sim2 = st.columns(2)
-        T_h   = sim1.number_input("T_h [°C]", value=70.0, min_value=0.0, max_value=150.0, key="th")
         t_end = sim1.number_input("t_end [s]", value=2.0, min_value=0.01, step=0.1, key="tend")
         dt    = sim2.number_input("dt [s]", value=0.002, min_value=1e-5, step=0.001,
                                    format="%.4f", key="dt")
 
+        if th_mode == "Konstantes T_h":
+            T_h = st.number_input("T_h [°C]", value=70.0, min_value=0.0, max_value=150.0, key="th")
+            m_mod = c_mod = T_amb = None
+        else:
+            dyn1, dyn2 = st.columns(2)
+            m_mod = dyn1.number_input("m – Modulmasse [kg]", value=0.150,
+                                       min_value=1e-4, step=0.01, format="%.4f", key="th_m")
+            c_mod = dyn2.number_input("c – spez. Wärmekap. [J/(kg·K)]", value=700.0,
+                                       min_value=1.0, step=10.0, key="th_c")
+            T_amb = st.number_input("T_amb – Umgebungstemperatur [°C]", value=40.0,
+                                     min_value=-40.0, max_value=125.0, key="th_tamb")
+            T_h = None
+
     # -----------------------------------------------------------------------
     # Berechnung
     # -----------------------------------------------------------------------
-    # Verluste mit T_h als erste T_j-Näherung (keine Iteration)
+    # T_j-Näherung für die Verlust-Interpolation: festes T_h bzw. T_amb (dyn. Modus)
+    T_j_approx = T_h if th_mode == "Konstantes T_h" else T_amb
+
     loss_result = compute_p_losses(
         I_avg=I_avg,
         vce_sat_25=vce_25,
         vce_sat_125=vce_125,
+        vce_sat_mid=vce_mid,
+        vce_mode=vce_mode,
+        T_mid=T_mid,
+        T_op=T_op,
         E_on_25=E_on_25 / 1000.0,    # mJ → J
         E_on_125=E_on_125 / 1000.0,
         E_off_25=E_off_25 / 1000.0,
         E_off_125=E_off_125 / 1000.0,
         f_sw=f_sw,
         duty_cycle=duty_cycle,
-        T_j=T_h,
+        T_j=T_j_approx,
     )
     P_cond = loss_result["P_cond"]
     P_sw   = loss_result["P_sw"]
     P_tot  = loss_result["P_tot"]
 
+    # T_h: konstant (Skalar) oder dynamisch T_h(t) aus thermischer Masse
+    t_arr_pre = np.arange(0.0, t_end + dt, dt)
+    if th_mode == "Konstantes T_h":
+        T_h_input = T_h
+    else:
+        T_h_input = heatsink_temperature(
+            P_tot=P_tot, Rth=rth_sum, m=m_mod, c=c_mod, Tamb=T_amb, t=t_arr_pre,
+        )
+
     sim_result = simulate_tj(
         P_tot=P_tot,
-        T_h=T_h,
+        T_h=T_h_input,
         r=r_vals,
         tau=tau_vals,
         t_end=t_end,
@@ -332,17 +391,21 @@ with tab_t:
     st.divider()
     st.subheader("Ergebnisse")
 
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    Th_end = sim_result["Th_end"]
+
+    mc1, mc2, mc3, mc4, mc5, mc6 = st.columns(6)
     mc1.metric("P_cond",
                f"{P_cond:.1f} W",
-               help=f"D={duty_cycle:.2f} × V_CE,sat({T_h:.0f}°C)={loss_result['V_CE_sat_eff']:.3f}V × I={I_avg:.0f}A")
+               help=f"D={duty_cycle:.2f} × V_CE,sat={loss_result['V_CE_sat_eff']:.3f}V × I={I_avg:.0f}A")
     mc2.metric("P_sw",
                f"{P_sw:.1f} W",
                help=f"(E_on={loss_result['E_on_eff']*1000:.1f}mJ + E_off={loss_result['E_off_eff']*1000:.1f}mJ) × {f_sw:.0f}Hz")
     mc3.metric("P_tot",  f"{P_tot:.1f} W")
-    mc4.metric("T_j,∞",  f"{sim_result['Tj_inf']:.1f} °C",
-               help=f"T_h + P_tot × R_th = {T_h:.0f} + {P_tot:.1f}×{rth_sum:.4f}")
-    mc5.metric("R_th,jh", f"{rth_sum:.4f} K/W")
+    mc4.metric("T_h,end", f"{Th_end:.1f} °C",
+               help="Konstant: eingegebenes T_h · Dynamisch: T_h(t_end)")
+    mc5.metric("T_j,∞",  f"{sim_result['Tj_inf']:.1f} °C",
+               help=f"T_h,end + P_tot × R_th = {Th_end:.1f} + {P_tot:.1f}×{rth_sum:.4f}")
+    mc6.metric("R_th,jh", f"{rth_sum:.4f} K/W")
 
     # -----------------------------------------------------------------------
     # Plots
@@ -350,22 +413,31 @@ with tab_t:
     t_arr   = sim_result["t"]
     zth_arr = sim_result["Zth"]
     tj_arr  = sim_result["Tj"]
+    th_arr  = sim_result["Th"]
+
+    th_title = ("T_h(t) – Kühlkörpertemperatur (dynamisch)"
+                if th_mode == "Dynamisches T_h(t)"
+                else "T_h – Kühlkörpertemperatur (konstant)")
 
     fig_th = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=["T_j(t) – Sperrschichttemperatur", "Z_th(t) – Thermische Impedanz (Foster)"],
-        vertical_spacing=0.14,
+        rows=3, cols=1,
+        subplot_titles=[
+            th_title,
+            "Z_th(t) – Thermische Impedanz (Foster)",
+            "T_j(t) – Sperrschichttemperatur",
+        ],
+        vertical_spacing=0.10,
     )
 
-    # T_j(t)
+    # T_h(t) (oder konstante Linie)
     fig_th.add_trace(go.Scatter(
-        x=t_arr, y=tj_arr, name="T_j(t)",
-        line=dict(color="#e74c3c", width=2),
+        x=t_arr, y=th_arr, name="T_h(t)",
+        line=dict(color="#16a085", width=2),
     ), row=1, col=1)
     fig_th.add_hline(
-        y=sim_result["Tj_inf"],
-        line_dash="dash", line_color="#c0392b",
-        annotation_text=f"T_j,∞ = {sim_result['Tj_inf']:.1f} °C",
+        y=Th_end,
+        line_dash="dash", line_color="#0e6655",
+        annotation_text=f"T_h,end = {Th_end:.1f} °C",
         row=1, col=1,
     )
 
@@ -381,11 +453,25 @@ with tab_t:
         row=2, col=1,
     )
 
+    # T_j(t)
+    fig_th.add_trace(go.Scatter(
+        x=t_arr, y=tj_arr, name="T_j(t)",
+        line=dict(color="#e74c3c", width=2),
+    ), row=3, col=1)
+    fig_th.add_hline(
+        y=sim_result["Tj_inf"],
+        line_dash="dash", line_color="#c0392b",
+        annotation_text=f"T_j,∞ = {sim_result['Tj_inf']:.1f} °C",
+        row=3, col=1,
+    )
+
     fig_th.update_xaxes(title_text="Zeit t [s]", type="log", row=1, col=1)
     fig_th.update_xaxes(title_text="Zeit t [s]", type="log", row=2, col=1)
-    fig_th.update_yaxes(title_text="T_j [°C]",   row=1, col=1)
+    fig_th.update_xaxes(title_text="Zeit t [s]", type="log", row=3, col=1)
+    fig_th.update_yaxes(title_text="T_h [°C]",   row=1, col=1)
     fig_th.update_yaxes(title_text="Z_th [K/W]", row=2, col=1)
-    fig_th.update_layout(template="plotly_white", height=620, showlegend=False)
+    fig_th.update_yaxes(title_text="T_j [°C]",   row=3, col=1)
+    fig_th.update_layout(template="plotly_white", height=820, showlegend=False)
     st.plotly_chart(fig_th, use_container_width=True)
 
     # Sensitivität: T_j,∞ vs. Duty-Cycle
@@ -394,11 +480,12 @@ with tab_t:
     for d in duty_sweep:
         lr = compute_p_losses(
             I_avg=I_avg, vce_sat_25=vce_25, vce_sat_125=vce_125,
+            vce_sat_mid=vce_mid, vce_mode=vce_mode, T_mid=T_mid, T_op=T_op,
             E_on_25=E_on_25/1000, E_on_125=E_on_125/1000,
             E_off_25=E_off_25/1000, E_off_125=E_off_125/1000,
-            f_sw=f_sw, duty_cycle=d, T_j=T_h,
+            f_sw=f_sw, duty_cycle=d, T_j=T_j_approx,
         )
-        tj_inf_sweep.append(T_h + lr["P_tot"] * rth_sum)
+        tj_inf_sweep.append(Th_end + lr["P_tot"] * rth_sum)
 
     fig_sens = go.Figure()
     fig_sens.add_trace(go.Scatter(
@@ -418,31 +505,39 @@ with tab_t:
     with st.expander("ℹ️ Formeln & Modellgrenzen"):
         st.markdown("""
 **Leitverluste (mit Duty-Cycle):**
-$$P_{cond} = D \\cdot V_{CE,sat}(T_j) \\cdot I_{avg}$$
+$$P_{cond} = D \\cdot V_{CE,sat} \\cdot I_{avg}$$
 
-*V_CE,sat wird linear zwischen 25 °C und 125 °C interpoliert.*
+*V_CE,sat: fester Stützpunkt (25 °C / mid / 125 °C) oder lineare Interpolation
+über die drei Stützstellen anhand T_op.*
 
 **Schaltverluste (temperaturabhängig):**
 $$P_{sw} = (E_{on}(T_j) + E_{off}(T_j)) \\cdot f_{sw}$$
 
-*E_on und E_off werden ebenfalls linear zwischen 25 °C und 125 °C interpoliert.*
+*E_on und E_off werden linear zwischen 25 °C und 125 °C interpoliert.*
 
 **Gesamtverluste:**
 $$P_{tot} = P_{cond} + P_{sw}$$
 
+**Kühlkörpertemperatur T_h:**
+- *Konstant:* fester Eingabewert $T_h$
+- *Dynamisch:* $T_h(t) = \\dfrac{P_{tot} \\cdot R_{th} \\cdot t}{m \\cdot c \\cdot R_{th} + t} + T_{amb}$
+
 **Foster Z_th(t):**
-$$Z_{th}(t) = \\sum_i r_i \\left(1 - e^{-t/\\tau_i}\\right)$$
+$$Z_{th}(t) = \\sum_i r_i \\left(1 - e^{-t/\\tau_i}\\right)
+\\qquad T_j(t) = T_h(t) + P_{tot} \\cdot Z_{th}(t)$$
 
 Die Kurve ist **nicht-linear** weil jedes RC-Glied eine andere thermische Schicht
 repräsentiert (Chip-Bond → Substrat → Baseplate → Kühlkörper). Auf logarithmischer
 Zeitachse sieht man den stufenförmigen Anstieg je Schicht.
 
 **Stationärer Endwert:**
-$$T_{j,\\infty} = T_h + P_{tot} \\cdot \\sum_i r_i$$
+$$T_{j,\\infty} = T_{h,end} + P_{tot} \\cdot \\sum_i r_i$$
+
+mit $T_{h,end} = T_h$ (konstant) bzw. $T_h(t_{end})$ (dynamisch).
 
 **Modellgrenzen:**
 - I_avg: manueller Input, keine automatische Topologie-/Duty-Cycle-Modellierung des Stroms
-- T_h: externer Parameter (aus Kühlkörper-Simulation oder Messung)
+- T_h: konstant (extern) oder dynamisch aus thermischer Masse (m, c, T_amb, R_th)
 - Duty-Cycle D beeinflusst P_cond; Schaltenergien sind pro Schaltimpuls (nicht D-gewichtet)
 - P_tot als zeitlich konstant angenommen
 - Foster-Modell aus Datenblatt-Z_th (junction-to-heatsink oder junction-to-case)
