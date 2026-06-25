@@ -2,60 +2,30 @@
 Halbleiter-Verlustmodell – IGBT/MOSFET.
 
 Implementiert:
-  P_cond = V_CE,sat(T) * I_avg          (Leitverluste, linear interpoliert)
-  P_sw   = (E_on + E_off) * f_sw        (Schaltverluste)
-  P_tot  = P_cond + P_sw                (Gesamtverluste)
+  P_cond = D * V_CE,sat(T_j) * I_avg           (Leitverluste, mit Duty-Cycle)
+  P_sw   = (E_on(T_j) + E_off(T_j)) * f_sw     (Schaltverluste, T_j-abhängig)
+  P_tot  = P_cond + P_sw                         (Gesamtverluste)
 
 Hinweise / Modellgrenzen:
   - I_avg ist ein manueller Eingabeparameter (kein automatisches Lastmodell).
-  - V_CE,sat wird linear zwischen drei Datenblattpunkten interpoliert.
-  - Noch keine Duty-Cycle- oder Topologie-Modellierung.
-  - I_avg kann später durch ein Lastmodell (z. B. aus Modulationsindex und Strom)
-    ersetzt werden – dazu einfach `I_avg` in `compute_p_losses()` durch den
-    berechneten Wert ersetzen.
+  - V_CE,sat und E_sw werden linear zwischen 25 °C und 125 °C interpoliert.
+  - Duty-Cycle D = t_on / T_sw (0…1); beeinflusst P_cond.
+  - E_on und E_off skalieren nicht mit D (Schaltenergie pro Puls, unabhängig).
+  - I_avg kann später durch ein Lastmodell ersetzt werden.
 """
 
 import numpy as np
-from typing import Sequence
 
 
 # ---------------------------------------------------------------------------
-# Hilfsfunktion: V_CE,sat-Interpolation
+# Hilfsfunktion: lineare Interpolation zwischen 25 °C und 125 °C
 # ---------------------------------------------------------------------------
 
-def interpolate_vce_sat(
-    T_j: float,
-    vce_25: float,
-    vce_T2: float,
-    T2: float,
-    vce_125: float,
-    T1: float = 25.0,
-    T3: float = 125.0,
-) -> float:
-    """
-    Lineare Interpolation von V_CE,sat zwischen drei Temperaturstufen.
-
-    Stützstellen: (T1=25°C, vce_25), (T2, vce_T2), (T3=125°C, vce_125)
-
-    Args:
-        T_j:      Aktuelle Sperrschichttemperatur [°C]
-        vce_25:   V_CE,sat bei 25 °C [V]
-        vce_T2:   V_CE,sat bei T2 [V]
-        T2:       Mittlere Temperatur-Stützstelle [°C]
-        vce_125:  V_CE,sat bei 125 °C [V]
-        T1:       Untere Stützstelle (default 25 °C)
-        T3:       Obere Stützstelle (default 125 °C)
-
-    Returns:
-        V_CE,sat bei T_j [V]
-    """
-    T_j = float(np.clip(T_j, T1, T3))
-    if T_j <= T2:
-        t = (T_j - T1) / max(T2 - T1, 1e-9)
-        return vce_25 + t * (vce_T2 - vce_25)
-    else:
-        t = (T_j - T2) / max(T3 - T2, 1e-9)
-        return vce_T2 + t * (vce_125 - vce_T2)
+def _interp_25_125(T_j: float, val_25: float, val_125: float) -> float:
+    """Lineare Interpolation zwischen 25 °C und 125 °C."""
+    T_j = float(np.clip(T_j, 25.0, 125.0))
+    t = (T_j - 25.0) / 100.0          # 0 bei 25 °C, 1 bei 125 °C
+    return val_25 + t * (val_125 - val_25)
 
 
 # ---------------------------------------------------------------------------
@@ -65,49 +35,50 @@ def interpolate_vce_sat(
 def compute_p_losses(
     I_avg: float,
     vce_sat_25: float,
-    vce_sat_T2: float,
-    T2: float,
     vce_sat_125: float,
-    E_on: float,
-    E_off: float,
+    E_on_25: float,
+    E_on_125: float,
+    E_off_25: float,
+    E_off_125: float,
     f_sw: float,
+    duty_cycle: float = 0.5,
     T_j: float = 25.0,
-    T1: float = 25.0,
-    T3: float = 125.0,
 ) -> dict:
     """
     Berechnet Leit-, Schalt- und Gesamtverluste.
 
-    P_cond = V_CE,sat(T_j) * I_avg
-    P_sw   = (E_on + E_off) * f_sw
+    P_cond = D * V_CE,sat(T_j) * I_avg
+    P_sw   = (E_on(T_j) + E_off(T_j)) * f_sw
     P_tot  = P_cond + P_sw
 
     Args:
         I_avg:        Mittlerer Kollektorstrom (manuelle Eingabe) [A]
         vce_sat_25:   V_CE,sat bei 25 °C [V]
-        vce_sat_T2:   V_CE,sat bei mittlerer Temperatur T2 [V]
-        T2:           Mittlere Temperatur-Stützstelle [°C]
         vce_sat_125:  V_CE,sat bei 125 °C [V]
-        E_on:         Einschaltverlustenergie [J]
-        E_off:        Ausschaltverlustenergie [J]
+        E_on_25:      Einschaltverlustenergie bei 25 °C [J]
+        E_on_125:     Einschaltverlustenergie bei 125 °C [J]
+        E_off_25:     Ausschaltverlustenergie bei 25 °C [J]
+        E_off_125:    Ausschaltverlustenergie bei 125 °C [J]
         f_sw:         Schaltfrequenz [Hz]
-        T_j:          Sperrschichttemperatur für V_CE,sat-Interpolation [°C]
-        T1:           Untere Temperatur-Stützstelle (default 25 °C)
-        T3:           Obere Temperatur-Stützstelle (default 125 °C)
+        duty_cycle:   Einschaltverhältnis D = t_on / T_sw [-] (0…1)
+        T_j:          Sperrschichttemperatur für Interpolation [°C]
 
     Returns:
-        dict mit: P_cond, P_sw, P_tot, V_CE_sat_eff
+        dict mit: P_cond, P_sw, P_tot, V_CE_sat_eff, E_on_eff, E_off_eff
     """
-    vce_eff = interpolate_vce_sat(
-        T_j, vce_sat_25, vce_sat_T2, T2, vce_sat_125, T1, T3
-    )
-    p_cond = vce_eff * I_avg
-    p_sw   = (E_on + E_off) * f_sw
+    vce_eff  = _interp_25_125(T_j, vce_sat_25, vce_sat_125)
+    e_on_eff = _interp_25_125(T_j, E_on_25,    E_on_125)
+    e_off_eff = _interp_25_125(T_j, E_off_25,  E_off_125)
+
+    p_cond = duty_cycle * vce_eff * I_avg
+    p_sw   = (e_on_eff + e_off_eff) * f_sw
     p_tot  = p_cond + p_sw
 
     return {
-        "P_cond":       float(p_cond),
-        "P_sw":         float(p_sw),
-        "P_tot":        float(p_tot),
-        "V_CE_sat_eff": float(vce_eff),
+        "P_cond":        float(p_cond),
+        "P_sw":          float(p_sw),
+        "P_tot":         float(p_tot),
+        "V_CE_sat_eff":  float(vce_eff),
+        "E_on_eff":      float(e_on_eff),
+        "E_off_eff":     float(e_off_eff),
     }
