@@ -13,12 +13,11 @@ Ampel-Schwellen (normiert auf 0–100 %):
 
 Maximale Punkte je Komponente (aus Excel-Methodik):
   Kondensator : 35
-  Transistor  : 55
   Spule       : 25
   Relais      : 15
   Leiterplatte: 55
   System      : 30
-  GESAMT      : 215
+  GESAMT      : 160
 """
 
 from dataclasses import dataclass, field
@@ -27,13 +26,12 @@ from typing import Dict, Tuple
 # Maximale Punktzahl je Komponente (aus Gesamtbewertungs-Sheet)
 MAX_SCORES: Dict[str, int] = {
     "Kondensator": 35,
-    "Transistor":  55,
     "Spule":       25,
     "Relais":      15,
     "Leiterplatte": 55,
     "System":      30,
 }
-TOTAL_MAX: int = sum(MAX_SCORES.values())  # 215
+TOTAL_MAX: int = sum(MAX_SCORES.values())  # 160
 
 
 @dataclass
@@ -73,86 +71,6 @@ class ComponentScore:
             return "orange", "MITTEL (50–79 %)"
         else:
             return "red", "KRITISCH (< 50 %)"
-
-
-# ---------------------------------------------------------------------------
-# Bewertungshelfer: Score-Tabellen aus dem Excel-Methodik-Sheet
-# ---------------------------------------------------------------------------
-
-def score_halbleitermaterial(material: str) -> float:
-    """
-    SiC → 5 | GaN → 4 | Si (modern) → 3 | Si (alt) → 1 | unbekannt → 0
-    """
-    mapping = {"SiC": 5, "GaN": 4, "Si (modern)": 3, "Si (klassisch)": 1}
-    return float(mapping.get(material, 0))
-
-
-def score_chip_attach(tech: str) -> float:
-    """
-    Sintern → 5 | Press-fit → 4 | Weichlot (SnAg) → 3 | unbekannt → 0
-    """
-    mapping = {"Sintern": 5, "Press-fit": 4, "Weichlot (SnAg)": 3}
-    return float(mapping.get(tech, 0))
-
-
-def score_bond_tech(tech: str) -> float:
-    """
-    Ribbon/Cu (bondlos) → 5 | Cu-Draht → 4 | Al-Draht → 2
-    """
-    mapping = {"Ribbon / Cu (bondlos)": 5, "Cu-Draht": 4, "Al-Draht": 2}
-    return float(mapping.get(tech, 0))
-
-
-def score_substrat(material: str) -> float:
-    """
-    Si₃N₄ → 5 | AlN → 4 | Al₂O₃ → 2 | andere → 1
-    """
-    mapping = {"Si₃N₄": 5, "AlN": 4, "Al₂O₃": 2}
-    return float(mapping.get(material, 1))
-
-
-def score_baseplate(material: str) -> float:
-    """
-    AlSiC → 5 | Cu → 3 | ohne Baseplate → 1
-    """
-    mapping = {"AlSiC": 5, "Cu": 3, "ohne Baseplate": 1}
-    return float(mapping.get(material, 1))
-
-
-def score_aec(qual: str) -> float:
-    """
-    AEC-Q101/Q102 → 5 | Industrie → 3 | keine → 0
-    """
-    mapping = {"AEC-Q101 / Q102": 5, "Industrie-Qualifikation": 3, "keine": 0}
-    return float(mapping.get(qual, 0))
-
-
-def score_msl(level: int) -> float:
-    """
-    MSL 1 → 5 | MSL 2 → 4 | MSL 3 → 2 | MSL ≥ 4 → 1
-    """
-    if level == 1:
-        return 5.0
-    elif level == 2:
-        return 4.0
-    elif level == 3:
-        return 2.0
-    else:
-        return 1.0
-
-
-def score_gate_charge(Q_G_nC: float) -> float:
-    """
-    < 20 nC → 5 | 20–100 nC → 3 | 100–500 nC → 1 | > 500 nC → 0
-    """
-    if Q_G_nC < 20:
-        return 5.0
-    elif Q_G_nC < 100:
-        return 3.0
-    elif Q_G_nC < 500:
-        return 1.0
-    else:
-        return 0.0
 
 
 # ---------------------------------------------------------------------------
